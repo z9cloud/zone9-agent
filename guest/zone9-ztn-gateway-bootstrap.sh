@@ -30,7 +30,10 @@ API_URL="$(cat /etc/zone9/api-url 2>/dev/null || echo https://zone9.cloud/api/v1
 API_URL="${API_URL%/}"
 STATE="${ZONE9_STATE_DIR:-/var/lib/zone9}"
 SERIAL_FILE="${ZONE9_SERIAL_FILE:-/sys/class/dmi/id/product_serial}"
-LOG="logger -t zone9-ztn-gateway"
+# The gateway has no login (no sshd, no getty), so the only place an operator
+# can see what happened is the serial console: log to the journal AND /dev/console.
+log() { logger -t zone9-ztn-gateway "$*"; printf 'zone9-ztn-gateway: %s\n' "$*" > /dev/console 2>/dev/null || true; }
+LOG=log
 
 serial="$(cat "$SERIAL_FILE" 2>/dev/null || true)"
 case "$serial" in
