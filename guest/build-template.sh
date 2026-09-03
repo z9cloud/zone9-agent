@@ -112,6 +112,20 @@ cmd_build() {
   mkdir -p "$WORK"
   local img="$WORK/$(basename "$url")" out="$WORK/z9-$name.qcow2"
 
+  # Check the space up front. Without this the failure surfaces halfway through
+  # `qemu-img convert` or inside virt-customize, where the error names a temporary
+  # file rather than the actual cause. Roughly: the base image, plus a working copy
+  # that grows as packages are installed into it.
+  local need_gb=12 free_kb
+  free_kb="$(df -Pk "$WORK" | awk 'NR==2 {print $4}')"
+  if [ -n "$free_kb" ] && [ "$free_kb" -lt $((need_gb * 1024 * 1024)) ]; then
+    printf 'not enough space in %s: %d GB free, ~%d GB needed.\n' \
+      "$WORK" "$((free_kb / 1024 / 1024))" "$need_gb" >&2
+    echo "Grow this host's disk, or point ZONE9_TEMPLATE_WORKDIR at a larger filesystem." >&2
+    echo "Cached base images can also be removed: rm -f $WORK/*.img $WORK/*.qcow2" >&2
+    exit 1
+  fi
+
   echo "==> 1/3 downloading cloud image"
   [ -f "$img" ] || curl -fSL --retry 3 -o "$img" "$url"
 
