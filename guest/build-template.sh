@@ -33,6 +33,15 @@ set -euo pipefail
 WORK="${ZONE9_TEMPLATE_WORKDIR:-/var/tmp/zone9-templates}"
 STORAGE="${ZONE9_TEMPLATE_STORAGE:-Ceph-SSD}"
 BRIDGE="${ZONE9_TEMPLATE_BRIDGE:-vmbr0}"
+# Set inside cmd_build, removed by the EXIT trap below. It has to live at file
+# scope: the trap fires after the function's locals are gone.
+HOOK_TMP=""
+# The image is built under a .partial name and only renamed once virt-customize has
+# succeeded. So a file named z9-*.qcow2 is always a finished image: a failed or
+# interrupted run cannot leave something behind that looks importable.
+PARTIAL=""
+trap 'rm -f "${HOOK_TMP:-}" "${PARTIAL:-}"' EXIT
+
 HOOK_URL="${ZONE9_GUEST_NET_URL:-https://raw.githubusercontent.com/z9cloud/zone9-agent/main/guest/zone9-guest-net.sh}"
 
 usage() {
@@ -130,24 +139,32 @@ cmd_build() {
   [ -f "$img" ] || curl -fSL --retry 3 -o "$img" "$url"
 
   echo "==> 2/3 preparing a working copy"
-  qemu-img convert -O qcow2 "$img" "$out"
+  PARTIAL="$out.partial"
+  qemu-img convert -O qcow2 "$img" "$PARTIAL"
 
   echo "==> 3/3 writing into the image (never booted)"
   # The routing policy is installed in two places on purpose. The real script goes
   # to /usr/local/sbin, which `cloud-init clean` does not touch; the per-boot
   # directory gets only a two-line wrapper. If the wrapper is ever wiped, recovery
   # is one line rather than a rebuild.
-  local hook_tmp="$WORK/.per-boot-hook.$$"
-  printf '#!/bin/sh\nexec /usr/local/sbin/zone9-guest-net\n' > "$hook_tmp"
-  trap 'rm -f "$hook_tmp"' EXIT
+  HOOK_TMP="$WORK/.per-boot-hook.$$"
+  printf '#!/bin/sh\nexec /usr/local/sbin/zone9-guest-net\n' > "$HOOK_TMP"
 
   local args=(
+    # Cloud images ship /etc/resolv.conf as a symlink into systemd-resolved's runtime
+    # directory, which does not exist inside the libguestfs appliance. Without this,
+    # `apt-get update` fails silently and the install reports the far more confusing
+    # "Unable to locate package". Put a real resolver in place, and restore whatever
+    # the image had once the installs are done — the template must not ship a
+    # hardcoded nameserver.
+    --run-command 'mv /etc/resolv.conf /etc/resolv.conf.z9bak 2>/dev/null || true'
+    --run-command 'printf "nameserver 1.1.1.1\nnameserver 8.8.8.8\n" > /etc/resolv.conf'
     --install qemu-guest-agent
     --run-command 'systemctl enable qemu-guest-agent || true'
     --upload "$hook:/usr/local/sbin/zone9-guest-net"
     --chmod  '0755:/usr/local/sbin/zone9-guest-net'
     --mkdir  '/var/lib/cloud/scripts/per-boot'
-    --upload "$hook_tmp:/var/lib/cloud/scripts/per-boot/zone9-guest-net"
+    --upload "$HOOK_TMP:/var/lib/cloud/scripts/per-boot/zone9-guest-net"
     --chmod  '0755:/var/lib/cloud/scripts/per-boot/zone9-guest-net'
     # Serial console: the panel's console feature is served over this.
     --run-command 'systemctl enable serial-getty@ttyS0.service || true'
@@ -162,15 +179,20 @@ cmd_build() {
       --run-command 'INSTALL_K3S_SKIP_START=true INSTALL_K3S_SKIP_ENABLE=true /usr/local/bin/k3s-install.sh'
     )
   fi
+  # Hand DNS back to the image's own configuration.
+  args+=( --run-command 'rm -f /etc/resolv.conf; mv /etc/resolv.conf.z9bak /etc/resolv.conf 2>/dev/null || true' )
   # Reset machine-id so clones do not share an identity (DHCP and systemd key off it).
   args+=( --truncate /etc/machine-id )
 
   # If the build host is itself a VM, nested virtualisation may be off and libguestfs
   # will fail to find KVM. TCG is slow but works.
-  virt-customize -a "$out" "${args[@]}" || {
+  virt-customize -a "$PARTIAL" "${args[@]}" || {
     echo "--> retrying without KVM (slow)"
-    LIBGUESTFS_BACKEND_SETTINGS=force_tcg virt-customize -a "$out" "${args[@]}"
+    LIBGUESTFS_BACKEND_SETTINGS=force_tcg virt-customize -a "$PARTIAL" "${args[@]}"
   }
+
+  mv "$PARTIAL" "$out"
+  PARTIAL=""
 
   cat <<EOF
 
