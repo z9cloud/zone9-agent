@@ -74,7 +74,15 @@ resolve_hook() {
 cmd_build() {
   local distro="${1:-}"; shift || true
   local k3s=0
-  for a in "$@"; do [ "$a" = "--k3s" ] && k3s=1; done
+  for a in "$@"; do
+    case "$a" in
+      --k3s) k3s=1 ;;
+      # A vmid here is a common slip: it belongs to the import phase, and silently
+      # ignoring it would let someone believe they had chosen one.
+      [0-9]*) echo "the vmid belongs to the import phase: $0 import $a <file.qcow2>" >&2; exit 1 ;;
+      *) echo "unknown argument: $a" >&2; usage ;;
+    esac
+  done
   [ -n "$distro" ] || usage
 
   local url name
@@ -88,8 +96,17 @@ cmd_build() {
   [ "$k3s" = 1 ] && name="$name-k3s"
 
   command -v virt-customize >/dev/null || {
-    echo "virt-customize not found. Run this phase on a build host, NOT on a" >&2
-    echo "Proxmox node:  apt install libguestfs-tools" >&2; exit 1; }
+    if command -v qm >/dev/null; then
+      echo "virt-customize not found — and this looks like a Proxmox node." >&2
+      echo "Do not install libguestfs here; it pulls in ~100 packages. Run the" >&2
+      echo "build phase on another machine, then copy the qcow2 over and use:" >&2
+      echo "    $0 import <vmid> <file.qcow2>" >&2
+    else
+      echo "virt-customize not found. Install it on this build host:" >&2
+      echo "    apt install -y libguestfs-tools     # Debian/Ubuntu" >&2
+      echo "    dnf install -y libguestfs-tools-c   # Rocky/RHEL" >&2
+    fi
+    exit 1; }
 
   local hook; hook="$(resolve_hook)"
   mkdir -p "$WORK"
