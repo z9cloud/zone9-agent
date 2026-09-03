@@ -182,7 +182,11 @@ cmd_build() {
     # "Unable to locate package". Put a real resolver in place, and restore whatever
     # the image had once the installs are done — the template must not ship a
     # hardcoded nameserver.
-    --run-command 'mv /etc/resolv.conf /etc/resolv.conf.z9bak 2>/dev/null || true'
+    # Cloud images ship /etc/resolv.conf as a SYMLINK into a runtime dir that does
+    # not exist in the appliance; mv would follow it and leave a dangling link that
+    # --upload cannot then overwrite. Preserve the link target if it exists, then
+    # remove the link so --upload creates a fresh file.
+    --run-command '[ -f /etc/resolv.conf ] && [ ! -L /etc/resolv.conf ] && cp /etc/resolv.conf /etc/resolv.conf.z9bak; rm -f /etc/resolv.conf; true'
     --upload "$RESOLV_TMP:/etc/resolv.conf"
     --chmod '0644:/etc/resolv.conf'
     # Fail here, loudly, rather than inside apt — where the same problem surfaces as
@@ -213,7 +217,13 @@ cmd_build() {
     )
   fi
   # Hand DNS back to the image's own configuration.
-  args+=( --run-command 'rm -f /etc/resolv.conf; mv /etc/resolv.conf.z9bak /etc/resolv.conf 2>/dev/null || true' )
+  args+=(
+    --run-command 'rm -f /etc/resolv.conf'
+    # If we had a real file, restore it. Otherwise recreate the symlink these cloud
+    # images ship — pointing at systemd-resolved's runtime stub, which the running
+    # guest fills in itself at boot.
+    --run-command '[ -f /etc/resolv.conf.z9bak ] && mv /etc/resolv.conf.z9bak /etc/resolv.conf || ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf'
+  )
   # Reset machine-id so clones do not share an identity (DHCP and systemd key off it).
   args+=( --truncate /etc/machine-id )
 
