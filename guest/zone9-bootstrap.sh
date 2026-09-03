@@ -21,8 +21,8 @@
 set -eu
 
 PANEL_URL="$(cat /etc/zone9/panel-url 2>/dev/null || echo https://zone9.cloud)"
-STATE=/var/lib/zone9
-SERIAL_FILE=/sys/class/dmi/id/product_serial
+STATE="${ZONE9_STATE_DIR:-/var/lib/zone9}"
+SERIAL_FILE="${ZONE9_SERIAL_FILE:-/sys/class/dmi/id/product_serial}"
 LOG="logger -t zone9-bootstrap"
 
 serial="$(cat "$SERIAL_FILE" 2>/dev/null || true)"
