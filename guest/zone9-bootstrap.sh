@@ -20,7 +20,10 @@
 #   tailscale-gateway   join a tailnet and advertise the VPC's routes
 set -eu
 
-PANEL_URL="$(cat /etc/zone9/panel-url 2>/dev/null || echo https://zone9.cloud)"
+# Base URL of the panel API (not the web root: on zone9.cloud the API is served
+# under /api/v1). Self-hosted installs override it in /etc/zone9/api-url.
+API_URL="$(cat /etc/zone9/api-url 2>/dev/null || echo https://zone9.cloud/api/v1)"
+API_URL="${API_URL%/}"
 STATE="${ZONE9_STATE_DIR:-/var/lib/zone9}"
 SERIAL_FILE="${ZONE9_SERIAL_FILE:-/sys/class/dmi/id/product_serial}"
 LOG="logger -t zone9-bootstrap"
@@ -40,7 +43,7 @@ tmp="$(mktemp)"; trap 'rm -f "$tmp"' EXIT
 i=0; code=000
 while [ "$i" -lt 30 ]; do
   code="$(curl -sS --max-time 15 -o "$tmp" -w '%{http_code}' \
-          -H "Authorization: Bearer $token" "$PANEL_URL/v1/bootstrap?format=env" || echo 000)"
+          -H "Authorization: Bearer $token" "$API_URL/bootstrap?format=env" || echo 000)"
   case "$code" in
     200) break ;;
     401|410) $LOG "panel refused the bootstrap token (HTTP $code): $(head -c 200 "$tmp")"; exit 1 ;;
