@@ -1,5 +1,9 @@
 #!/bin/sh
-# zone9-bootstrap — first-boot configuration for platform images.
+# zone9-ztn-gateway-bootstrap — first boot of a Zero Trust gateway VM.
+#
+# The gateway is a small platform VM in a private network's management subnet
+# that joins the customer's tailnet as a subnet router. This script runs once
+# and does exactly that; it is not a general agent.
 #
 # How a VM gets its configuration when the hypervisor offers no channel for it:
 # Proxmox cloud-init can carry addresses and SSH keys but no files or commands,
@@ -16,8 +20,8 @@
 # A failed attempt leaves no marker, so it is retried on the next boot; a
 # spent token stays spent, so the operator issues a new one.
 #
-# Kinds handled:
-#   tailscale-gateway   join a tailnet and advertise the VPC's routes
+# The panel labels the payload with kind=tailscale-gateway; anything else is
+# refused here — a k8s node image carries its own bootstrap script.
 set -eu
 
 # Base URL of the panel API (not the web root: on zone9.cloud the API is served
@@ -26,7 +30,7 @@ API_URL="$(cat /etc/zone9/api-url 2>/dev/null || echo https://zone9.cloud/api/v1
 API_URL="${API_URL%/}"
 STATE="${ZONE9_STATE_DIR:-/var/lib/zone9}"
 SERIAL_FILE="${ZONE9_SERIAL_FILE:-/sys/class/dmi/id/product_serial}"
-LOG="logger -t zone9-bootstrap"
+LOG="logger -t zone9-ztn-gateway"
 
 serial="$(cat "$SERIAL_FILE" 2>/dev/null || true)"
 case "$serial" in
@@ -35,7 +39,7 @@ case "$serial" in
 esac
 
 mkdir -p "$STATE"
-marker="$STATE/bootstrap.$(printf '%s' "$token" | cksum | cut -d' ' -f1).done"
+marker="$STATE/ztn-gateway.$(printf '%s' "$token" | cksum | cut -d' ' -f1).done"
 [ -f "$marker" ] && exit 0
 
 # The network may not be fully up when per-boot scripts run; retry for a while.
@@ -83,7 +87,7 @@ case "$Z9_KIND" in
       --accept-dns=false
     $LOG "tailscale-gateway up: routes=$Z9_ROUTES login=$Z9_LOGIN_SERVER"
     ;;
-  *) $LOG "unknown bootstrap kind: $Z9_KIND"; exit 1 ;;
+  *) $LOG "refusing bootstrap kind '$Z9_KIND': this image is a Zero Trust gateway"; exit 1 ;;
 esac
 
 printf 'kind=%s\nat=%s\n' "$Z9_KIND" "$(date -u +%FT%TZ)" > "$marker"
