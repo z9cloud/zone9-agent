@@ -36,11 +36,12 @@ BRIDGE="${ZONE9_TEMPLATE_BRIDGE:-vmbr0}"
 # Set inside cmd_build, removed by the EXIT trap below. It has to live at file
 # scope: the trap fires after the function's locals are gone.
 HOOK_TMP=""
+RESOLV_TMP=""
 # The image is built under a .partial name and only renamed once virt-customize has
 # succeeded. So a file named z9-*.qcow2 is always a finished image: a failed or
 # interrupted run cannot leave something behind that looks importable.
 PARTIAL=""
-trap 'rm -f "${HOOK_TMP:-}" "${PARTIAL:-}"' EXIT
+trap 'rm -f "${HOOK_TMP:-}" "${PARTIAL:-}" "${RESOLV_TMP:-}"' EXIT
 
 HOOK_URL="${ZONE9_GUEST_NET_URL:-https://raw.githubusercontent.com/z9cloud/zone9-agent/main/guest/zone9-guest-net.sh}"
 
@@ -57,6 +58,24 @@ environment:
   ZONE9_GUEST_NET          path to zone9-guest-net.sh; downloaded if unset
 EOF
   exit 1
+}
+
+# Which nameservers the appliance should use while installing packages.
+#
+# Not a hardcoded public resolver: many networks allow outbound HTTPS but block UDP/53
+# to the internet, so 1.1.1.1 fails while the site's own resolver works. Take what this
+# host actually uses. On systemd-resolved machines /etc/resolv.conf points at the local
+# stub (127.0.0.53), which is meaningless inside the appliance — the real upstreams are
+# in /run/systemd/resolve/resolv.conf, so that file is read first.
+host_resolvers() {
+  if [ -n "${ZONE9_TEMPLATE_DNS:-}" ]; then
+    printf '%s\n' $ZONE9_TEMPLATE_DNS; return
+  fi
+  { [ -r /run/systemd/resolve/resolv.conf ] && cat /run/systemd/resolve/resolv.conf
+    [ -r /etc/resolv.conf ] && cat /etc/resolv.conf
+  } 2>/dev/null \
+    | awk '/^nameserver/ && $2 !~ /^127\./ && $2 !~ /:/ {print $2}' \
+    | awk '!seen[$0]++' | head -3
 }
 
 # Locate the guest routing script. When build-template.sh is downloaded on its own,
@@ -94,12 +113,12 @@ cmd_build() {
   done
   [ -n "$distro" ] || usage
 
-  local url name
+  local url name mirror
   case "$distro" in
-    ubuntu-24.04) url="https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img"; name="ubuntu-24.04" ;;
-    ubuntu-22.04) url="https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img"; name="ubuntu-22.04" ;;
-    debian-12)    url="https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-amd64.qcow2"; name="debian-12" ;;
-    rocky-9)      url="https://dl.rockylinux.org/pub/rocky/9/images/x86_64/Rocky-9-GenericCloud.latest.x86_64.qcow2"; name="rocky-9" ;;
+    ubuntu-24.04) url="https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img"; name="ubuntu-24.04"; mirror="archive.ubuntu.com" ;;
+    ubuntu-22.04) url="https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img"; name="ubuntu-22.04"; mirror="archive.ubuntu.com" ;;
+    debian-12)    url="https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-amd64.qcow2"; name="debian-12"; mirror="deb.debian.org" ;;
+    rocky-9)      url="https://dl.rockylinux.org/pub/rocky/9/images/x86_64/Rocky-9-GenericCloud.latest.x86_64.qcow2"; name="rocky-9"; mirror="dl.rockylinux.org" ;;
     *) usage ;;
   esac
   [ "$k3s" = 1 ] && name="$name-k3s"
@@ -142,7 +161,13 @@ cmd_build() {
   PARTIAL="$out.partial"
   qemu-img convert -O qcow2 "$img" "$PARTIAL"
 
+  local ns; ns="$(host_resolvers)"
+  [ -n "$ns" ] || ns="1.1.1.1
+8.8.8.8"
+  RESOLV_TMP="$WORK/.resolv.$$"
+  printf 'nameserver %s\n' $ns > "$RESOLV_TMP"
   echo "==> 3/3 writing into the image (never booted)"
+  echo "    appliance DNS: $(echo $ns | tr '\n' ' ')"
   # The routing policy is installed in two places on purpose. The real script goes
   # to /usr/local/sbin, which `cloud-init clean` does not touch; the per-boot
   # directory gets only a two-line wrapper. If the wrapper is ever wiped, recovery
@@ -158,7 +183,15 @@ cmd_build() {
     # the image had once the installs are done — the template must not ship a
     # hardcoded nameserver.
     --run-command 'mv /etc/resolv.conf /etc/resolv.conf.z9bak 2>/dev/null || true'
-    --run-command 'printf "nameserver 1.1.1.1\nnameserver 8.8.8.8\n" > /etc/resolv.conf'
+    --upload "$RESOLV_TMP:/etc/resolv.conf"
+    --chmod '0644:/etc/resolv.conf'
+    # Fail here, loudly, rather than inside apt — where the same problem surfaces as
+    # the far more confusing "Unable to locate package".
+    --run-command "getent hosts $mirror >/dev/null 2>&1 || {
+        echo; echo 'zone9: the build appliance cannot resolve $mirror.'
+        echo 'Its DNS comes from this host. Check that the resolvers printed above'
+        echo 'are reachable, or set one explicitly:  ZONE9_TEMPLATE_DNS=10.0.0.53'
+        exit 1; }"
     --install qemu-guest-agent
     --run-command 'systemctl enable qemu-guest-agent || true'
     --upload "$hook:/usr/local/sbin/zone9-guest-net"
