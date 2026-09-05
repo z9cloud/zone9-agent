@@ -47,6 +47,27 @@ while read -r gw dev; do
   if is_private "$gw"; then PRIV_GW="$gw"; PRIV_DEV="$dev"; else PUB_DEV="$dev"; fi
 done < /run/zone9-guest-net.defaults
 
+# Single private leg whose default is a network gateway VM (not the subnet's
+# anycast .1): the VPC's other subnets must still be reached through the anycast,
+# because the gateway does not route between legs. Per the address plan (ADR-037)
+# a VPC is the enclosing /20 of the interface's address; the anycast gateway is the
+# first host of the interface's own subnet. The route is added explicitly here since
+# cloud-init cannot express it.
+if [ -n "$PRIV_GW" ] && [ -z "$PUB_DEV" ]; then
+  addr="$(ip -4 -o addr show dev "$PRIV_DEV" 2>/dev/null | awk '{print $4; exit}')"   # 10.192.16.20/24
+  ip_only="${addr%/*}"; bits="${addr#*/}"
+  if [ -n "$ip_only" ] && [ "$bits" -ge 20 ] 2>/dev/null; then
+    o1="${ip_only%%.*}"; rest="${ip_only#*.}"; o2="${rest%%.*}"; rest="${rest#*.}"; o3="${rest%%.*}"
+    anycast="$o1.$o2.$o3.1"
+    if [ "$PRIV_GW" != "$anycast" ]; then
+      vpc="$o1.$o2.$(( o3 & 240 )).0/20"
+      ip -4 route replace "$vpc" via "$anycast" dev "$PRIV_DEV" metric 50
+      echo "zone9-guest-net: default via gateway $PRIV_GW; VPC $vpc via anycast $anycast"
+      exit 0
+    fi
+  fi
+fi
+
 if [ -z "$PRIV_GW" ] || [ -z "$PUB_DEV" ]; then
   echo "zone9-guest-net: single-homed or no public leg; routes unchanged"
   exit 0
