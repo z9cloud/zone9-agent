@@ -34,6 +34,17 @@ log() { logger -t zone9-gateway "$*"; printf 'zone9-gateway: %s\n' "$*" > /dev/c
 
 mkdir -p "$STATE"
 
+# Same RFC1918 classification as zone9-guest-net; an empty next hop (on-link
+# default) counts as public.
+is_private() {
+  case "$1" in
+    10.*) return 0 ;;
+    192.168.*) return 0 ;;
+    172.1[6-9].*|172.2[0-9].*|172.3[0-1].*) return 0 ;;
+  esac
+  return 1
+}
+
 # ---------------------------------------------------------------------------
 # 1. Egress — every boot
 # ---------------------------------------------------------------------------
@@ -43,7 +54,23 @@ mkdir -p "$STATE"
 # order in which cloud-init executes per-boot hooks.
 [ -x /usr/local/sbin/zone9-guest-net ] && /usr/local/sbin/zone9-guest-net || true
 
-pub_if="$(ip -4 route show default 2>/dev/null | awk '/default/ {print $5; exit}')"
+# The public leg is the default route whose next hop is NOT RFC1918. "The first
+# default route" was not good enough: the panel can leave a default route on a
+# private leg too, and then MASQUERADE is written on the wrong interface and every
+# customer machine behind the gateway silently loses egress (measured in production
+# on 2026-09-07, after a fourth leg was attached). Fall back to the first default
+# route when no public one exists, so a single-homed test VM still configures.
+ip -4 route show default 2>/dev/null | awk '{gw="";dev="";
+  for (i=1;i<=NF;i++) { if ($i=="via") gw=$(i+1); else if ($i=="dev") dev=$(i+1) }
+  if (dev != "") print gw" "dev}' > /run/zone9-gateway.defaults
+pub_if=""; first_if=""
+while read -r gw dev; do
+  [ -n "$dev" ] || continue
+  [ -n "$first_if" ] || first_if="$dev"
+  is_private "$gw" && continue
+  pub_if="$dev"; break
+done < /run/zone9-gateway.defaults
+[ -n "$pub_if" ] || pub_if="$first_if"
 if [ -z "$pub_if" ]; then
   log "no default route yet; egress not configured (will retry next boot)"
 else
