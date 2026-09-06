@@ -42,10 +42,16 @@ $cbDir = 'C:\Program Files\Cloudbase Solutions\Cloudbase-Init'
 # Konsolda elle kurulmuş olmalı: ağ sürücüsü (NetKVM) ve guest agent oradan gelir ve
 # bu betiğin buraya gelebilmesi zaten ikisine bağlı. Yine de doğrulanır: eksikse
 # şablon panelden yönetilemez (temiz kapatma, IP raporu).
-if (-not (Get-Service QEMU-GA -ErrorAction SilentlyContinue)) {
-  Fail 'QEMU-GA servisi yok — virtio guest tools (virtio-win-gt-x64.msi) kurulmamış'
+# virtio-win-gt-x64.msi SÜRÜCÜLERİ kurar; guest agent aynı ISO'da AYRI bir MSI'dır
+# (guest-agent\qemu-ga-x86_64.msi). Sürücüler kurulup agent unutulunca VM ağ alır ama
+# node'dan yönetilemez — ve bu betik zaten guest exec ile geldiği için buraya varmışsa
+# agent çalışıyor demektir. Yine de servisi doğrula: kapalıysa başlatmayı dene.
+$ga = Get-Service QEMU-GA -ErrorAction SilentlyContinue
+if (-not $ga) {
+  Fail 'QEMU-GA servisi yok — virtio ISO''sundaki guest-agent\qemu-ga-x86_64.msi kurulmalı'
 }
-Step "guest agent: $((Get-Service QEMU-GA).Status)"
+if ($ga.Status -ne 'Running') { Start-Service QEMU-GA; $ga.Refresh() }
+Step "guest agent: $($ga.Status)"
 
 # --- 2. cloudbase-init ----------------------------------------------------------
 # Panelin verdiği ad/adres/parolayı misafire uygulayan parça. Proxmox cloud-init'i
