@@ -22,7 +22,8 @@
 #
 #   distro     a customer server template (ubuntu/debian/rocky): cloud-init makes
 #              users, sshd stays, the serial console is enabled.
-#   appliance  a zone9 product VM — `gateway` (Ağ Geçidi) or `lb` (Yük dengeleyici).
+#   appliance  a zone9 product VM — `gateway` (Ağ Geçidi), `lb` (Yük dengeleyici)
+#              or `s3` (Nesne Depolama düğümü).
 #              Nobody logs into these: sshd and snapd are removed, cloud-init makes
 #              no users, every getty is masked. They receive their instructions from
 #              the panel over an outbound HTTPS call (SMBIOS bootstrap token), so a
@@ -38,6 +39,7 @@
 #   ./build-template.sh build ubuntu-24.04 --k3s
 #   ./build-template.sh build gateway
 #   ./build-template.sh build lb
+#   ./build-template.sh build s3
 #   scp /var/tmp/zone9-templates/z9-debian-12.qcow2 root@<node>:/var/tmp/
 #
 # --- on the Proxmox node ---
@@ -73,7 +75,7 @@ usage() {
   cat >&2 <<EOF
 usage:
   $0 build  <ubuntu-24.04|ubuntu-22.04|debian-12|rocky-9> [--k3s]
-  $0 build  <gateway|lb>          zone9 appliance (locked: no login, no sshd)
+  $0 build  <gateway|lb|s3>       zone9 appliance (locked: no login, no sshd)
   $0 import <vmid> <z9-*.qcow2>
 
 environment:
@@ -346,6 +348,105 @@ CFG
     echo "zone9: lb gates passed, zone9-lb $(/usr/local/bin/zone9-lb --version)"' )
 }
 
+s3_args() {
+  local hook="$1"
+  local bootstrap; bootstrap="$(resolve_guest_file zone9-s3-bootstrap.sh)"
+
+  # Garage is pinned by version AND by checksum. There is no upstream checksum file
+  # to fetch (verified: 404), so the hash is recorded here; a changed binary fails
+  # the build instead of silently shipping something else into every customer's
+  # store. Bumping the version means bumping this line — deliberately manual.
+  local garage_version="${ZONE9_GARAGE_VERSION:-v2.1.0}"
+  local garage_sha="${ZONE9_GARAGE_SHA256:-543b0414d1464ab855ebe9b843938a5e5361fd24436891ce3dff9e03d02839d8}"
+  local garage_url="https://garagehq.deuxfleurs.fr/_releases/$garage_version/x86_64-unknown-linux-musl/garage"
+
+  # zone9-s3 ships DISABLED: its EnvironmentFile carries the VM identity, which only
+  # exists after the bootstrap token has been exchanged.
+  cat > "$APP_TMPDIR/zone9-s3.service" <<'UNIT'
+[Unit]
+Description=zone9 object storage daemon (pulls panel config into Garage)
+Documentation=https://github.com/z9cloud/zone9-agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+EnvironmentFile=/etc/zone9/s3.env
+ExecStart=/usr/local/bin/zone9-s3
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+  # Garage itself. It ships DISABLED and with NO config: zone9-s3 writes
+  # /etc/garage.toml from the panel's intent on its first pull and starts it then.
+  # A service that crash-loops on a missing file would bury the real first error.
+  cat > "$APP_TMPDIR/garage.service" <<'UNIT'
+[Unit]
+Description=Garage object storage
+After=network-online.target
+Wants=network-online.target
+[Service]
+ExecStart=/usr/local/bin/garage -c /etc/garage.toml server
+Restart=on-failure
+RestartSec=5
+# Garage keeps its own data under /var/lib/garage; nothing else needs writing.
+ProtectSystem=strict
+ReadWritePaths=/var/lib/garage
+ProtectHome=yes
+NoNewPrivileges=yes
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+  cat > "$APP_TMPDIR/zone9-agent-update.default" <<'DEF'
+ZONE9_AGENT_ASSET=zone9-s3
+ZONE9_AGENT_BIN=/usr/local/bin/zone9-s3
+ZONE9_AGENT_UNIT=zone9-s3
+DEF
+
+  ARGS+=(
+    # Nothing to install: Garage is a static binary and the store lives on the root
+    # disk, which the panel sizes and cloud-init grows. No S3 gateway and no proxy
+    # either — TLS is terminated at the customer's load balancer (ADR-040 §3).
+    --run-command "curl -fsSL --retry 3 -o /usr/local/bin/garage $garage_url"
+    --run-command "echo '$garage_sha  /usr/local/bin/garage' | sha256sum -c -"
+    --chmod '0755:/usr/local/bin/garage'
+    --run-command "curl -fsSL --retry 3 -o /usr/local/bin/zone9-s3 $RELEASE_BASE_URL/zone9-s3-linux-amd64"
+    --run-command "curl -fsSL --retry 3 -o /usr/local/sbin/zone9-agent-update $RELEASE_BASE_URL/zone9-agent-update"
+    --chmod '0755:/usr/local/bin/zone9-s3'
+    --chmod '0755:/usr/local/sbin/zone9-agent-update'
+    --upload "$APP_TMPDIR/zone9-agent-update.default:/etc/default/zone9-agent-update"
+    --upload "$APP_TMPDIR/zone9-s3.service:/etc/systemd/system/zone9-s3.service"
+    --upload "$APP_TMPDIR/garage.service:/etc/systemd/system/garage.service"
+    --mkdir '/var/lib/garage'
+    --run-command 'zone9-agent-update --install || true'
+    --run-command 'systemctl enable zone9-agent-update.timer || true'
+    --run-command 'systemctl disable zone9-s3 2>/dev/null || true'
+    --run-command 'systemctl disable garage 2>/dev/null || true'
+  )
+  appliance_common_args "$hook" "$bootstrap" zone9-s3-bootstrap zone9-zz-s3-bootstrap
+  appliance_gate_args
+  ARGS+=( --run-command '
+    fail() { echo "zone9 GATE FAILED: $1" >&2; exit 1; }
+    [ -x /usr/local/bin/garage ] || fail "garage binary missing"
+    /usr/local/bin/garage --version | grep -q . || fail "garage does not run"
+    [ -x /usr/local/bin/zone9-s3 ] || fail "zone9-s3 binary missing"
+    /usr/local/bin/zone9-s3 --version | grep -q . || fail "zone9-s3 does not run"
+    [ -x /usr/local/sbin/zone9-s3-bootstrap ] || fail "s3 bootstrap missing"
+    [ -x /var/lib/cloud/scripts/per-boot/zone9-zz-s3-bootstrap ] || fail "s3 hook missing"
+    [ -f /etc/systemd/system/zone9-s3.service ] || fail "zone9-s3 unit missing"
+    [ -f /etc/systemd/system/garage.service ] || fail "garage unit missing"
+    [ -e /etc/garage.toml ] && fail "garage.toml must NOT ship in the image (it carries the cluster secrets)"
+    grep -q "^ZONE9_AGENT_ASSET=zone9-s3$" /etc/default/zone9-agent-update || fail "updater not pointed at zone9-s3"
+    systemctl is-enabled zone9-s3 2>/dev/null | grep -q "^enabled$" && fail "zone9-s3 must ship disabled (identity comes at bootstrap)"
+    systemctl is-enabled garage 2>/dev/null | grep -q "^enabled$" && fail "garage must ship disabled (it has no config until the daemon writes one)"
+    echo "zone9: s3 gates passed, garage $(/usr/local/bin/garage --version | head -1), zone9-s3 $(/usr/local/bin/zone9-s3 --version)"' )
+}
+
 # ------------------------------------------------------------------ build phase
 cmd_build() {
   local distro="${1:-}"; shift || true
@@ -365,7 +466,7 @@ cmd_build() {
   case "$distro" in
     # Appliances are Ubuntu 24.04 underneath; the base is an implementation detail
     # and the name never mentions it (migration 0021 made the same call for the slug).
-    gateway|lb) url="https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img"; name="$distro"; mirror="archive.ubuntu.com"; appliance="$distro" ;;
+    gateway|lb|s3) url="https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img"; name="$distro"; mirror="archive.ubuntu.com"; appliance="$distro" ;;
     ubuntu-24.04) url="https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img"; name="ubuntu-24.04"; mirror="archive.ubuntu.com" ;;
     ubuntu-22.04) url="https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img"; name="ubuntu-22.04"; mirror="archive.ubuntu.com" ;;
     debian-12)    url="https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-amd64.qcow2"; name="debian-12"; mirror="deb.debian.org" ;;
@@ -466,6 +567,7 @@ cmd_build() {
     case "$appliance" in
       gateway) gateway_args "$hook" ;;
       lb)      lb_args "$hook" ;;
+      s3)      s3_args "$hook" ;;
     esac
   else
     ARGS+=(
