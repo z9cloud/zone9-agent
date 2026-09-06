@@ -106,6 +106,37 @@ host_resolvers() {
     | awk '!seen[$0]++' | head -3
 }
 
+# Çalışma dizini kullanılabilir mi: VAR, YAZILABİLİR ve YETERLİ YER var mı.
+#
+# Bu kontrol indirmelerden ÖNCE koşar. Sonra koşuyordu ve sonucu şuydu: dizin dolu ya
+# da başka bir kullanıcıya aitse ilk curl "(23) Failure writing output to destination"
+# ile düşüyor, sebebi hiçbir yerde yazmıyordu (prod'da yaşandı).
+ensure_workdir() {
+  local need_gb="${1:-1}"
+  mkdir -p "$WORK" 2>/dev/null || {
+    echo "çalışma dizini oluşturulamadı: $WORK" >&2
+    echo "başka bir yer seçin:  ZONE9_TEMPLATE_WORKDIR=\$HOME/tpl $0 ..." >&2
+    exit 1; }
+  if ! ( : > "$WORK/.z9write" ) 2>/dev/null; then
+    echo "çalışma dizinine yazılamıyor: $WORK" >&2
+    ls -ld "$WORK" >&2
+    echo "sahibi başka bir kullanıcıysa dizini silin (sudo rm -rf $WORK) ya da" >&2
+    echo "başka bir yer seçin:  ZONE9_TEMPLATE_WORKDIR=\$HOME/tpl $0 ..." >&2
+    exit 1
+  fi
+  rm -f "$WORK/.z9write"
+  local free_kb
+  free_kb="$(df -Pk "$WORK" | awk 'NR==2 {print $4}')"
+  if [ -n "$free_kb" ] && [ "$free_kb" -lt $((need_gb * 1024 * 1024)) ]; then
+    printf 'yer yetmiyor (%s): %d GB boş, ~%d GB gerekli.\n' \
+      "$WORK" "$((free_kb / 1024 / 1024))" "$need_gb" >&2
+    df -h "$WORK" >&2
+    echo "diski büyütün, ZONE9_TEMPLATE_WORKDIR'ı daha büyük bir bölüme alın ya da" >&2
+    echo "önbelleği silin:  rm -f $WORK/*.img $WORK/*.qcow2" >&2
+    exit 1
+  fi
+}
+
 # Locate a guest script. When build-template.sh is downloaded on its own, its
 # dependencies will not be sitting next to it — fetch them rather than failing.
 resolve_guest_file() {
@@ -114,9 +145,10 @@ resolve_guest_file() {
   if [ -f "$here/$name" ]; then printf '%s' "$here/$name"; return; fi
   local dl="$WORK/$name"
   echo "--> fetching $name from $GUEST_BASE_URL" >&2
-  mkdir -p "$WORK"
+  ensure_workdir 1
   curl -fsSL --retry 3 -o "$dl" "$GUEST_BASE_URL/$name" || {
-    echo "could not download $name; place it next to this file" >&2; exit 1; }
+    echo "$name indirilemedi ($GUEST_BASE_URL/$name)" >&2
+    echo "ağ engelliyse dosyayı bu betiğin yanına koyun" >&2; exit 1; }
   printf '%s' "$dl"
 }
 
@@ -359,23 +391,13 @@ cmd_build() {
     fi
     exit 1; }
 
-  local hook; hook="$(resolve_hook)"
-  mkdir -p "$WORK"
-  local img="$WORK/$(basename "$url")" out="$WORK/z9-$name.qcow2"
+  # Yer ve yazma hakkı EN BAŞTA: taban imaj + üzerine paket kurulurken büyüyen kopya.
+  # Hata yarı yolda `qemu-img convert` ya da virt-customize içinde çıkarsa, mesaj asıl
+  # sebebi değil geçici bir dosyayı gösterir.
+  ensure_workdir 12
 
-  # Check the space up front. Without this the failure surfaces halfway through
-  # `qemu-img convert` or inside virt-customize, where the error names a temporary
-  # file rather than the actual cause. Roughly: the base image, plus a working copy
-  # that grows as packages are installed into it.
-  local need_gb=12 free_kb
-  free_kb="$(df -Pk "$WORK" | awk 'NR==2 {print $4}')"
-  if [ -n "$free_kb" ] && [ "$free_kb" -lt $((need_gb * 1024 * 1024)) ]; then
-    printf 'not enough space in %s: %d GB free, ~%d GB needed.\n' \
-      "$WORK" "$((free_kb / 1024 / 1024))" "$need_gb" >&2
-    echo "Grow this host's disk, or point ZONE9_TEMPLATE_WORKDIR at a larger filesystem." >&2
-    echo "Cached base images can also be removed: rm -f $WORK/*.img $WORK/*.qcow2" >&2
-    exit 1
-  fi
+  local hook; hook="$(resolve_hook)"
+  local img="$WORK/$(basename "$url")" out="$WORK/z9-$name.qcow2"
 
   echo "==> 1/3 downloading cloud image"
   [ -f "$img" ] || curl -fSL --retry 3 -o "$img" "$url"
