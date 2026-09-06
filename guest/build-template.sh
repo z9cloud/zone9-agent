@@ -449,8 +449,12 @@ cmd_build() {
                    echo 'appliance ağı:' >&2
                    ip -4 addr show scope global 2>/dev/null | sed 's/^/  /' >&2
                    ip -4 route 2>/dev/null | sed 's/^/  /' >&2
-                   echo 'Adres/rota YOKSA sorun DNS değil, appliance ağı hiç açılmamış:' >&2
-                   echo '  libguestfs-test-tool 2>&1 | tail -20   (ağ ve KVM durumunu gösterir)' >&2
+                   echo 'Yukarısı BOŞSA sorun DNS değil: appliance ağı hiç açılmadı.' >&2
+                   echo 'En sık sebebi bu makinede DHCP istemcisi olmamasıdır — supermin' >&2
+                   echo 'appliance onu HOST paketlerinden derler, yoksa arayüz adres alamaz:' >&2
+                   echo '  sudo apt-get install -y isc-dhcp-client' >&2
+                   echo '  sudo rm -rf /var/tmp/.guestfs-* ~/.guestfs-*   # önbelleği yeniden kur' >&2
+                   echo '  libguestfs-test-tool 2>&1 | tail -20           # hâlâ olmazsa buna bak' >&2
                    echo 'Adres VARSA UDP/53 dışarı kapalıdır; iç çözücünüzü verin:' >&2
                    echo '  ZONE9_TEMPLATE_DNS=10.0.0.53 $0 build ...' >&2
                    exit 1"
