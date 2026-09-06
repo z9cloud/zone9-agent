@@ -87,6 +87,11 @@ Step "cloudbase-init: $cbExe"
 # İki dosya, iki aşama: `cloudbase-init.conf` normal açılışta, `-unattend.conf`
 # sysprep'in specialize aşamasında koşar. Unattend tarafı bilerek dar tutulur —
 # parolayı iki kez uygulamanın anlamı yok, orada yalnız diski büyütmek gerekir.
+#
+# NetworkConfigPlugin ŞART: panelin verdiği adresi (Proxmox `ipconfig0` → configdrive2)
+# misafire yazan tek parça odur. Olmadan VM açılır ama adressiz kalır — DHCP sunucusu
+# olmayan VPC'lerde hiçbir yere ulaşamaz. Sıra da önemli: ağ, ondan sonra gelen
+# eklentilerden (LocalScripts) önce kurulmalı.
 $main = @"
 [DEFAULT]
 username=Administrator
@@ -96,7 +101,7 @@ first_logon_behaviour=no
 config_drive_types=iso
 config_drive_locations=cdrom
 metadata_services=cloudbaseinit.metadata.services.configdrive.ConfigDriveService
-plugins=cloudbaseinit.plugins.common.mtu.MTUPlugin,cloudbaseinit.plugins.common.sethostname.SetHostNamePlugin,cloudbaseinit.plugins.windows.createuser.CreateUserPlugin,cloudbaseinit.plugins.common.setuserpassword.SetUserPasswordPlugin,cloudbaseinit.plugins.windows.extendvolumes.ExtendVolumesPlugin,cloudbaseinit.plugins.common.localscripts.LocalScriptsPlugin
+plugins=cloudbaseinit.plugins.common.mtu.MTUPlugin,cloudbaseinit.plugins.common.networkconfig.NetworkConfigPlugin,cloudbaseinit.plugins.common.sethostname.SetHostNamePlugin,cloudbaseinit.plugins.windows.createuser.CreateUserPlugin,cloudbaseinit.plugins.common.setuserpassword.SetUserPasswordPlugin,cloudbaseinit.plugins.windows.extendvolumes.ExtendVolumesPlugin,cloudbaseinit.plugins.common.localscripts.LocalScriptsPlugin
 volumes_to_extend=1
 allow_reboot=false
 stop_service_on_exit=false
@@ -143,6 +148,9 @@ Step 'sistem ayarları uygulandı (UTC, hazırda bekletme kapalı, Server Manage
 foreach ($f in @("$cbDir\conf\cloudbase-init.conf", "$cbDir\conf\cloudbase-init-unattend.conf",
                  "$cbDir\conf\Unattend.xml", $netPs1, $cbExe)) {
   if (-not (Test-Path $f)) { Fail "eksik: $f" }
+}
+if ((Get-Content "$cbDir\conf\cloudbase-init.conf" -Raw) -notmatch 'NetworkConfigPlugin') {
+  Fail 'cloudbase-init.conf içinde NetworkConfigPlugin yok — panelin verdiği IP uygulanmaz'
 }
 $svc = Get-Service cloudbase-init -ErrorAction SilentlyContinue
 if (-not $svc) { Fail 'cloudbase-init servisi kurulmamış' }
