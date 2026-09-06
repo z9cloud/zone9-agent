@@ -409,7 +409,10 @@ cmd_build() {
   [ -n "$ns" ] || ns="1.1.1.1
 8.8.8.8"
   echo "==> 3/3 writing into the image (never booted)"
-  echo "    appliance DNS: $(echo $ns | tr '\n' ' ')"
+  # Appliance'ın ağı qemu user-net'tir: dışarı UDP/53 kapalıysa bu makinenin çözücüleri
+  # oradan çalışmaz, ama qemu'nun kendi DNS vekili (10.0.2.3) host üzerinden çözer.
+  # Hangisinin çalıştığı imajın İÇİNDE denenir; ilk cevap veren yazılı kalır.
+  echo "    appliance DNS adayları: 10.0.2.3 192.168.122.1 $(echo $ns | tr '\n' ' ')"
   # The routing policy is installed in two places on purpose. The real script goes
   # to /usr/local/sbin, which `cloud-init clean` does not touch; the per-boot
   # directory gets only a two-line wrapper. If the wrapper is ever wiped, recovery
@@ -432,16 +435,17 @@ cmd_build() {
     # appliance — "upload: /etc/resolv.conf: No such file or directory" (2026-09-06).
     --run-command "[ -f /etc/resolv.conf ] && [ ! -L /etc/resolv.conf ] && cp /etc/resolv.conf /etc/resolv.conf.z9bak
                    rm -f /etc/resolv.conf
-                   printf 'nameserver %s\n' $ns > /etc/resolv.conf
-                   chmod 0644 /etc/resolv.conf
-                   grep -q nameserver /etc/resolv.conf || { echo 'zone9: resolv.conf yazılamadı' >&2; exit 1; }"
-    # Fail here, loudly, rather than inside apt — where the same problem surfaces as
-    # the far more confusing "Unable to locate package".
-    --run-command "getent hosts $mirror >/dev/null 2>&1 || {
-        echo; echo 'zone9: the build appliance cannot resolve $mirror.'
-        echo 'Its DNS comes from this host. Check that the resolvers printed above'
-        echo 'are reachable, or set one explicitly:  ZONE9_TEMPLATE_DNS=10.0.0.53'
-        exit 1; }"
+                   for c in 10.0.2.3 192.168.122.1 $ns; do
+                     printf 'options timeout:2 attempts:1\nnameserver %s\n' \"\$c\" > /etc/resolv.conf
+                     chmod 0644 /etc/resolv.conf
+                     if getent hosts $mirror >/dev/null 2>&1; then echo \"zone9: appliance resolver \$c\"; exit 0; fi
+                   done
+                   echo >&2
+                   echo 'zone9: appliance içinden $mirror çözülemedi.' >&2
+                   echo 'Denenenler: qemu DNS vekili (10.0.2.3), libvirt (192.168.122.1), bu makinenin' >&2
+                   echo 'çözücüleri ($ns). Bu makinede çalışıp appliance içinde çalışmıyorsa UDP/53' >&2
+                   echo 'dışarı kapalı demektir; iç çözücünüzü verin: ZONE9_TEMPLATE_DNS=10.0.0.53' >&2
+                   exit 1"
     --install qemu-guest-agent
     --run-command 'systemctl enable qemu-guest-agent || true'
   )
