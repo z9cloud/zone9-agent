@@ -435,16 +435,24 @@ cmd_build() {
     # appliance — "upload: /etc/resolv.conf: No such file or directory" (2026-09-06).
     --run-command "[ -f /etc/resolv.conf ] && [ ! -L /etc/resolv.conf ] && cp /etc/resolv.conf /etc/resolv.conf.z9bak
                    rm -f /etc/resolv.conf
-                   for c in 10.0.2.3 192.168.122.1 $ns; do
+                   gw=\$(ip -4 route show default 2>/dev/null | awk '{print \$3; exit}')
+                   nxt=\$(printf '%s' \"\$gw\" | awk -F. 'NF==4 {printf \"%s.%s.%s.%d\", \$1,\$2,\$3,\$4+1}')
+                   for c in \$gw \$nxt 169.254.0.3 10.0.2.3 192.168.122.1 $ns; do
+                     [ -n \"\$c\" ] || continue
                      printf 'options timeout:2 attempts:1\nnameserver %s\n' \"\$c\" > /etc/resolv.conf
                      chmod 0644 /etc/resolv.conf
                      if getent hosts $mirror >/dev/null 2>&1; then echo \"zone9: appliance resolver \$c\"; exit 0; fi
                    done
                    echo >&2
                    echo 'zone9: appliance içinden $mirror çözülemedi.' >&2
-                   echo 'Denenenler: qemu DNS vekili (10.0.2.3), libvirt (192.168.122.1), bu makinenin' >&2
-                   echo 'çözücüleri ($ns). Bu makinede çalışıp appliance içinde çalışmıyorsa UDP/53' >&2
-                   echo 'dışarı kapalı demektir; iç çözücünüzü verin: ZONE9_TEMPLATE_DNS=10.0.0.53' >&2
+                   echo \"denenen çözücüler: \$gw \$nxt 169.254.0.3 10.0.2.3 192.168.122.1 $ns\" >&2
+                   echo 'appliance ağı:' >&2
+                   ip -4 addr show scope global 2>/dev/null | sed 's/^/  /' >&2
+                   ip -4 route 2>/dev/null | sed 's/^/  /' >&2
+                   echo 'Adres/rota YOKSA sorun DNS değil, appliance ağı hiç açılmamış:' >&2
+                   echo '  libguestfs-test-tool 2>&1 | tail -20   (ağ ve KVM durumunu gösterir)' >&2
+                   echo 'Adres VARSA UDP/53 dışarı kapalıdır; iç çözücünüzü verin:' >&2
+                   echo '  ZONE9_TEMPLATE_DNS=10.0.0.53 $0 build ...' >&2
                    exit 1"
     --install qemu-guest-agent
     --run-command 'systemctl enable qemu-guest-agent || true'
