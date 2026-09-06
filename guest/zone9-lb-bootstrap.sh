@@ -31,6 +31,24 @@ mkdir -p "$STATE" /etc/zone9
 
 [ -x /usr/local/sbin/zone9-guest-net ] && /usr/local/sbin/zone9-guest-net || true
 
+# Refresh the updater itself on every boot, best effort. The updater updates the
+# daemon but not itself, so a bug in the updater would otherwise be permanent on
+# a locked VM (it happened: the LB stayed on an old daemon until fixed by hand).
+# Verified against the release's SHA256SUMS; on any failure the current copy stays.
+refresh_updater() {
+  base="https://github.com/${ZONE9_AGENT_REPO:-z9cloud/zone9-agent}/releases/latest/download"
+  d="$(mktemp -d)"
+  if curl -fsSL --max-time 20 -o "$d/u" "$base/zone9-agent-update" \
+     && curl -fsSL --max-time 20 -o "$d/sums" "$base/SHA256SUMS" \
+     && grep " zone9-agent-update\$" "$d/sums" | sed 's# zone9-agent-update$# u#' > "$d/want" \
+     && (cd "$d" && sha256sum -c want >/dev/null 2>&1) \
+     && ! cmp -s "$d/u" /usr/local/sbin/zone9-agent-update; then
+    install -m 0755 "$d/u" /usr/local/sbin/zone9-agent-update && log "updater refreshed from latest release"
+  fi
+  rm -rf "$d"
+}
+refresh_updater || true
+
 start_daemon() {
   systemctl enable --now haproxy >/dev/null 2>&1 || true
   systemctl enable zone9-lb >/dev/null 2>&1 || true
