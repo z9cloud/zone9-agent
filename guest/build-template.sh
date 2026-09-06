@@ -53,14 +53,13 @@ BRIDGE="${ZONE9_TEMPLATE_BRIDGE:-vmbr0}"
 # Set inside cmd_build, removed by the EXIT trap below. It has to live at file
 # scope: the trap fires after the function's locals are gone.
 HOOK_TMP=""
-RESOLV_TMP=""
 # virt-customize arguments; the appliance helpers append to this.
 ARGS=()
 # The image is built under a .partial name and only renamed once virt-customize has
 # succeeded. So a file named z9-*.qcow2 is always a finished image: a failed or
 # interrupted run cannot leave something behind that looks importable.
 PARTIAL=""
-trap 'rm -f "${HOOK_TMP:-}" "${PARTIAL:-}" "${RESOLV_TMP:-}"; [ -n "${APP_TMPDIR:-}" ] && rm -rf "$APP_TMPDIR"' EXIT
+trap 'rm -f "${HOOK_TMP:-}" "${PARTIAL:-}"; [ -n "${APP_TMPDIR:-}" ] && rm -rf "$APP_TMPDIR"' EXIT
 
 GUEST_BASE_URL="${ZONE9_GUEST_BASE_URL:-https://raw.githubusercontent.com/z9cloud/zone9-agent/main/guest}"
 # The appliance daemons and the updater ship as release assets of the same repo.
@@ -409,8 +408,6 @@ cmd_build() {
   local ns; ns="$(host_resolvers)"
   [ -n "$ns" ] || ns="1.1.1.1
 8.8.8.8"
-  RESOLV_TMP="$WORK/.resolv.$$"
-  printf 'nameserver %s\n' $ns > "$RESOLV_TMP"
   echo "==> 3/3 writing into the image (never booted)"
   echo "    appliance DNS: $(echo $ns | tr '\n' ' ')"
   # The routing policy is installed in two places on purpose. The real script goes
@@ -422,18 +419,22 @@ cmd_build() {
 
   ARGS=(
     # Cloud images ship /etc/resolv.conf as a symlink into systemd-resolved's runtime
-    # directory, which does not exist inside the libguestfs appliance. Without this,
-    # `apt-get update` fails silently and the install reports the far more confusing
-    # "Unable to locate package". Put a real resolver in place, and restore whatever
-    # the image had once the installs are done — the template must not ship a
+    # directory, which does not exist inside the libguestfs appliance. Without a real
+    # resolver `apt-get update` fails and the install reports the far more confusing
+    # "Unable to locate package". A real file is put in place here and the image's own
+    # arrangement is restored after the installs — the template must not ship a
     # hardcoded nameserver.
-    # Cloud images ship /etc/resolv.conf as a SYMLINK into a runtime dir that does
-    # not exist in the appliance; mv would follow it and leave a dangling link that
-    # --upload cannot then overwrite. Preserve the link target if it exists, then
-    # remove the link so --upload creates a fresh file.
-    --run-command '[ -f /etc/resolv.conf ] && [ ! -L /etc/resolv.conf ] && cp /etc/resolv.conf /etc/resolv.conf.z9bak; rm -f /etc/resolv.conf; true'
-    --upload "$RESOLV_TMP:/etc/resolv.conf"
-    --chmod '0644:/etc/resolv.conf'
+    #
+    # Removing the link and writing the file happen in ONE command on purpose. As two
+    # operations (--run-command + --upload) it fails: virt-customize does not
+    # necessarily run them in the order written, and an upload onto the still-present
+    # symlink follows it to /run/systemd/resolve/, which does not exist in the
+    # appliance — "upload: /etc/resolv.conf: No such file or directory" (2026-09-06).
+    --run-command "[ -f /etc/resolv.conf ] && [ ! -L /etc/resolv.conf ] && cp /etc/resolv.conf /etc/resolv.conf.z9bak
+                   rm -f /etc/resolv.conf
+                   printf 'nameserver %s\n' $ns > /etc/resolv.conf
+                   chmod 0644 /etc/resolv.conf
+                   grep -q nameserver /etc/resolv.conf || { echo 'zone9: resolv.conf yazılamadı' >&2; exit 1; }"
     # Fail here, loudly, rather than inside apt — where the same problem surfaces as
     # the far more confusing "Unable to locate package".
     --run-command "getent hosts $mirror >/dev/null 2>&1 || {
