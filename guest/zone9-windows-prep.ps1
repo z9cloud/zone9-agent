@@ -56,7 +56,15 @@ Step "guest agent: $($ga.Status)"
 # --- 2. cloudbase-init ----------------------------------------------------------
 # Panelin verdiği ad/adres/parolayı misafire uygulayan parça. Proxmox cloud-init'i
 # Windows'ta configdrive2 biçiminde üretir ve bunu okuyan tek yaygın araç budur.
-if (Test-Path "$cbDir\bin\cloudbase-init.exe") {
+# cloudbase-init kendi Python'unu getirir: çalıştırılabilir `bin\` altında DEĞİL,
+# `Python\Scripts\cloudbase-init.exe`tedir (`bin\` yalnız servis sarmalayıcısını taşır).
+# Sürümler arasında yeri değiştiği için sabit yol yerine ikisi de aranır.
+function Find-CbExe {
+  @("$cbDir\Python\Scripts\cloudbase-init.exe", "$cbDir\bin\cloudbase-init.exe") |
+    Where-Object { Test-Path $_ } | Select-Object -First 1
+}
+$cbExe = Find-CbExe
+if ($cbExe -or (Get-Service cloudbase-init -ErrorAction SilentlyContinue)) {
   Step 'cloudbase-init zaten kurulu'
 } else {
   Step 'cloudbase-init indiriliyor'
@@ -69,8 +77,11 @@ if (Test-Path "$cbDir\bin\cloudbase-init.exe") {
     '/i', "`"$msi`"", '/qn', '/norestart', 'RUN_SERVICE_AS_LOCAL_SYSTEM=1'
   if ($p.ExitCode -ne 0) { Fail "cloudbase-init kurulumu $($p.ExitCode) ile bitti" }
   Remove-Item $msi -Force -ErrorAction SilentlyContinue
+  $cbExe = Find-CbExe
 }
+if (-not $cbExe) { Fail "cloudbase-init.exe bulunamadı ($cbDir altında arandı)" }
 if (-not (Test-Path "$cbDir\conf\Unattend.xml")) { Fail "Unattend.xml yok: $cbDir\conf" }
+Step "cloudbase-init: $cbExe"
 
 # --- 3. yapılandırma ------------------------------------------------------------
 # İki dosya, iki aşama: `cloudbase-init.conf` normal açılışta, `-unattend.conf`
@@ -130,12 +141,13 @@ Step 'sistem ayarları uygulandı (UTC, hazırda bekletme kapalı, Server Manage
 # --- 6. kapı --------------------------------------------------------------------
 # Şablon kilitli değil ama sysprep'ten sonra buraya dönmek yeniden kurulum demek.
 foreach ($f in @("$cbDir\conf\cloudbase-init.conf", "$cbDir\conf\cloudbase-init-unattend.conf",
-                 "$cbDir\conf\Unattend.xml", $netPs1, "$cbDir\bin\cloudbase-init.exe")) {
+                 "$cbDir\conf\Unattend.xml", $netPs1, $cbExe)) {
   if (-not (Test-Path $f)) { Fail "eksik: $f" }
 }
-if ((Get-Service cloudbase-init -ErrorAction SilentlyContinue).StartType -eq 'Disabled') {
-  Fail 'cloudbase-init servisi devre dışı'
-}
+$svc = Get-Service cloudbase-init -ErrorAction SilentlyContinue
+if (-not $svc) { Fail 'cloudbase-init servisi kurulmamış' }
+if ($svc.StartType -eq 'Disabled') { Fail 'cloudbase-init servisi devre dışı' }
+Step "cloudbase-init servisi: $($svc.Status) / $($svc.StartType)"
 
 Write-Host ''
 Write-Host 'KAPI GECILDI — sırada sysprep (node''dan):' -ForegroundColor Green
