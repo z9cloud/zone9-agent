@@ -78,4 +78,20 @@ ip -4 route del default via "$PRIV_GW" dev "$PRIV_DEV" 2>/dev/null || true
 for net in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16; do
   ip -4 route replace "$net" via "$PRIV_GW" dev "$PRIV_DEV" metric 100
 done
+# Same rule as the single-leg case: if the private gateway is a network gateway VM
+# rather than the subnet's anycast .1, the VPC's own /20 must still go through the
+# anycast. Without this, traffic to the VPC's other subnets follows the RFC1918
+# route into the gateway VM, which does not forward between private legs (FORWARD
+# policy DROP) — a dual-homed VM in a subnet with a gateway silently lost its VPC.
+addr="$(ip -4 -o addr show dev "$PRIV_DEV" 2>/dev/null | awk '{print $4; exit}')"
+ip_only="${addr%/*}"; bits="${addr#*/}"
+if [ -n "$ip_only" ] && [ "$bits" -ge 20 ] 2>/dev/null; then
+  o1="${ip_only%%.*}"; rest="${ip_only#*.}"; o2="${rest%%.*}"; rest="${rest#*.}"; o3="${rest%%.*}"
+  anycast="$o1.$o2.$o3.1"
+  if [ "$PRIV_GW" != "$anycast" ]; then
+    vpc="$o1.$o2.$(( o3 & 240 )).0/20"
+    ip -4 route replace "$vpc" via "$anycast" dev "$PRIV_DEV" metric 50
+    echo "zone9-guest-net: VPC $vpc via anycast $anycast (gateway $PRIV_GW does not route between legs)"
+  fi
+fi
 echo "zone9-guest-net: public=$PUB_DEV (default), private=$PRIV_DEV via $PRIV_GW (RFC1918)"
