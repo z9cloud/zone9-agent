@@ -76,7 +76,7 @@ usage() {
 usage:
   $0 build  <ubuntu-24.04|ubuntu-22.04|debian-12|rocky-9> [--k3s]
   $0 build  <gateway|lb|s3>       zone9 appliance (locked: no login, no sshd)
-  $0 import <vmid> <z9-*.qcow2>
+  $0 import <vmid> <z9-*.qcow2>   z9-windows-* adı UEFI/q35/win11 şablonu üretir
 
 environment:
   ZONE9_TEMPLATE_WORKDIR   working directory      (default: /var/tmp/zone9-templates)
@@ -648,9 +648,33 @@ cmd_import() {
   case "$tpl" in z9-*) ;; *) echo "expected a z9-*.qcow2 filename, got: $tpl" >&2; exit 1 ;; esac
 
   echo "==> creating $tpl (vmid $vmid)"
-  qm create "$vmid" --name "$tpl" --memory 2048 --cores 2 --cpu host \
-    --net0 "virtio,bridge=$BRIDGE" --ostype l26 --scsihw virtio-scsi-single \
-    --serial0 socket --vga serial0 --agent 1
+  # Windows şablonu Linux'unkiyle aynı donanımda duramaz; aşağıdaki farkların her biri
+  # tek başına şablonu bozar (docs/plans/windows-sunucu.md §2.1, ist1 9060'ın gerçek
+  # config'iyle doğrulandı):
+  #
+  #   ostype win11  → PVE cloud-init'i configdrive2 üretir. l26 kalırsa sessizce nocloud
+  #                   üretilir, Windows hiçbir şey okumaz; üstelik executor'ın
+  #                   verifyTemplateOS'u ostype'a bakıp klonu reddeder.
+  #   bios ovmf + efidisk0 → misafir UEFI/GPT kurulu. SeaBIOS'ta diskte açılacak bir şey
+  #                   yoktur; VM PXE'ye düşer.
+  #   serial0 YOK   → Windows'ta seri konsol yok. Tanımlıysa panelin konsol ekranı
+  #                   olmayan bir uca bağlanmayı önerir (apps/web console: serialSupported).
+  #   sockets 1     → panel sockets yazmaz; 2 kalırsa müşteri paketin iki katı vCPU alır.
+  #   balloon YOK   → şablonda balloon kalırsa paket belleği düşürüldüğünde balloon > memory.
+  #   keyboard en-us→ noVNC keysym gönderir; misafir düzeni TR olursa panelin verdiği
+  #                   parola yanlış yazılır.
+  case "$tpl" in
+    z9-windows-*)
+      qm create "$vmid" --name "$tpl" --memory 4096 --sockets 1 --cores 2 --cpu host \
+        --net0 "virtio,bridge=$BRIDGE" --ostype win11 --machine q35 --bios ovmf \
+        --efidisk0 "$STORAGE:1,efitype=4m,pre-enrolled-keys=0" \
+        --scsihw virtio-scsi-single --vga std --keyboard en-us --citype configdrive2 \
+        --agent 1 ;;
+    *)
+      qm create "$vmid" --name "$tpl" --memory 2048 --cores 2 --cpu host \
+        --net0 "virtio,bridge=$BRIDGE" --ostype l26 --scsihw virtio-scsi-single \
+        --serial0 socket --vga serial0 --agent 1 ;;
+  esac
   qm importdisk "$vmid" "$file" "$STORAGE" >/dev/null
   # Do NOT assume the disk is named vm-<vmid>-disk-0. On Ceph a destroyed VM can
   # leave its image behind, importdisk then creates -disk-1, and a hardcoded -disk-0
@@ -659,7 +683,12 @@ cmd_import() {
   local disk; disk="$(qm config "$vmid" | awk -F': ' '/^unused0/ {print $2}')"
   [ -n "$disk" ] || { echo "importdisk left no unused0 entry; check: pvesm list $STORAGE --vmid $vmid" >&2; exit 1; }
   echo "    disk: $disk"
-  qm set "$vmid" --scsi0 "$disk" --boot order=scsi0
+  # discard/iothread yalnız Windows'ta: 9060 böyle üretildi ve klonların config'i
+  # şablondan miras alınır — ayrılırsa aynı imajdan çıkan iki sunucu farklı davranır.
+  case "$tpl" in
+    z9-windows-*) qm set "$vmid" --scsi0 "$disk,discard=on,iothread=1" --boot order=scsi0 ;;
+    *)            qm set "$vmid" --scsi0 "$disk" --boot order=scsi0 ;;
+  esac
   qm set "$vmid" --ide2 "$STORAGE:cloudinit"
   case "$tpl" in
     z9-gateway|z9-lb)
@@ -672,6 +701,8 @@ cmd_import() {
   case "$tpl" in
     z9-gateway|z9-lb)
       qm set "$vmid" --description "zone9 appliance template — ${tpl#z9-} (locked: no login; driven by the panel over SMBIOS bootstrap)" ;;
+    z9-windows-*)
+      qm set "$vmid" --description "zone9 image template — ${tpl#z9-} (cloudbase-init; BYOL, no licence included)" ;;
     *)
       qm set "$vmid" --description "zone9 image template — ${tpl#z9-} (routing policy in a cloud-init per-boot hook)" ;;
   esac

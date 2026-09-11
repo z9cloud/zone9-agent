@@ -143,6 +143,32 @@ New-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\ServerManager' -Name DoNotOpenS
   -Value 1 -PropertyType DWORD -Force | Out-Null
 Step 'sistem ayarları uygulandı (UTC, hazırda bekletme kapalı, Server Manager açılışta yok)'
 
+# --- 5.5 UEFI yedek önyükleyici -------------------------------------------------
+# Şablon başka bir cluster'a taşındığında (S3 üzerinden hel1'e) yanına BOŞ bir efidisk
+# gelir: NVRAM değişkenleri diskle birlikte gitmez, çünkü UEFI boot girdileri disk
+# imajında değil o ayrı diskte durur. Boş NVRAM'de "Windows Boot Manager" girdisi yoktur;
+# OVMF o zaman çıkarılabilir ortam yoluna, \EFI\BOOT\BOOTX64.EFI'ye bakar. Windows bu
+# yedek yolu HER KURULUMDA yazmaz — yoksa klon "no bootable device" ile açılmaz ve sebep
+# region'a taşındıktan gün(ler) sonra anlaşılır.
+#
+# Kopya imajın İÇİNDE durduğu için bir kez yapılır ve her kopyaya gider. Idempotent.
+$espMounted = $false
+try {
+  if (-not (Test-Path 'S:\')) { mountvol S: /S; $espMounted = $true }
+  $fallback = 'S:\EFI\BOOT\BOOTX64.EFI'
+  $primary  = 'S:\EFI\Microsoft\Boot\bootmgfw.efi'
+  if (-not (Test-Path $primary)) { Fail "ESP'de bootmgfw.efi yok — UEFI kurulumu değil?" }
+  if (-not (Test-Path $fallback)) {
+    New-Item -ItemType Directory -Force -Path 'S:\EFI\BOOT' | Out-Null
+    Copy-Item $primary $fallback -Force
+    Step 'UEFI yedek önyükleyici yazıldı (BOOTX64.EFI)'
+  } else {
+    Step 'UEFI yedek önyükleyici zaten var'
+  }
+} finally {
+  if ($espMounted) { mountvol S: /D }
+}
+
 # --- 6. kapı --------------------------------------------------------------------
 # Şablon kilitli değil ama sysprep'ten sonra buraya dönmek yeniden kurulum demek.
 foreach ($f in @("$cbDir\conf\cloudbase-init.conf", "$cbDir\conf\cloudbase-init-unattend.conf",
